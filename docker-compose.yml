@@ -1,0 +1,13 @@
+version: '3.4'
+services:
+  terminal:
+    image: ctmanjak/codedu_terminal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+      PYTHONUNBUFFERED: 0
+    ports:
+      - 8001:8001
+    command: ["uvicorn", "terminal:socket", "--reload", "--host", "0", "--port", "8001"]
