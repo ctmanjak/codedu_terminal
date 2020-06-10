@@ -10,7 +10,7 @@ services:
 - docker
 install:
 - pip install -r requirements.txt
-after_success:
+script:
 - bash image_build.sh
 notifications:
   email:
