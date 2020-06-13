@@ -26,8 +26,6 @@ class TerminalNamespace(socketio.AsyncNamespace):
         print(f"disconnect {sid}")
         session = await self.sio.get_session(sid)
         if session:
-            # os.killpg(os.getpgid(session['child_pid']), signal.SIGKILL)
-            # os.write(session['fd'], "exit\n".encode())
             try:
                 p = subprocess.Popen(["docker", "stop", sid], stdin=None, stdout=None, stderr=None, close_fds=True)
                 p.communicate(timeout=5)
