@@ -1,3 +1,4 @@
+import urllib
 import subprocess
 import types
 import time
@@ -242,8 +243,141 @@ async def _handle_connect(self, environ, transport, b64=False,
         except exceptions.QueueEmpty:
             return self._bad_request()
 
-sio = socketio.AsyncServer(async_mode='asgi')
-sio.register_namespace(TerminalNamespace('/', sio))
-socket = socketio.ASGIApp(sio)
+async def handle_request(self, *args, **kwargs):
+    """Handle an HTTP request from the client.
+    This is the entry point of the Engine.IO application. This function
+    returns the HTTP response to deliver to the client.
+    Note: this method is a coroutine.
+    """
+    translate_request = self._async['translate_request']
+    if asyncio.iscoroutinefunction(translate_request):
+        environ = await translate_request(*args, **kwargs)
+    else:
+        environ = translate_request(*args, **kwargs)
+    HTTP_X_FORWARDED_FOR = environ.get("HTTP_X_FORWARDED_FOR", None)
+    if HTTP_X_FORWARDED_FOR:
+        print(f"X-Forwarded-For: {HTTP_X_FORWARDED_FOR}")
+    else:
+        print(f"Client IP: {args[0]['client'][0]}")
+    if self.cors_allowed_origins != []:
+        # Validate the origin header if present
+        # This is important for WebSocket more than for HTTP, since
+        # browsers only apply CORS controls to HTTP.
+        origin = environ.get('HTTP_ORIGIN')
+        if origin:
+            allowed_origins = self._cors_allowed_origins(environ)
+            if allowed_origins is not None and origin not in \
+                    allowed_origins:
+                self.logger.info(origin + ' is not an accepted origin.')
+                r = self._bad_request()
+                make_response = self._async['make_response']
+                if asyncio.iscoroutinefunction(make_response):
+                    response = await make_response(
+                        r['status'], r['headers'], r['response'], environ)
+                else:
+                    response = make_response(r['status'], r['headers'],
+                                                r['response'], environ)
+                return response
 
+    method = environ['REQUEST_METHOD']
+    query = urllib.parse.parse_qs(environ.get('QUERY_STRING', ''))
+
+    sid = query['sid'][0] if 'sid' in query else None
+    b64 = False
+    jsonp = False
+    jsonp_index = None
+
+    if 'b64' in query:
+        if query['b64'][0] == "1" or query['b64'][0].lower() == "true":
+            b64 = True
+    if 'j' in query:
+        jsonp = True
+        try:
+            jsonp_index = int(query['j'][0])
+        except (ValueError, KeyError, IndexError):
+            # Invalid JSONP index number
+            pass
+
+    if jsonp and jsonp_index is None:
+        self.logger.warning('Invalid JSONP index number')
+        r = self._bad_request()
+    elif method == 'GET':
+        if sid is None:
+            transport = query.get('transport', ['polling'])[0]
+            if transport != 'polling' and transport != 'websocket':
+                self.logger.warning('Invalid transport %s', transport)
+                r = self._bad_request()
+            else:
+                r = await self._handle_connect(environ, transport,
+                                                b64, jsonp_index)
+        else:
+            if sid not in self.sockets:
+                self.logger.warning('Invalid session %s', sid)
+                r = self._bad_request()
+            else:
+                socket = self._get_socket(sid)
+                try:
+                    packets = await socket.handle_get_request(environ)
+                    if isinstance(packets, list):
+                        r = self._ok(packets, b64=b64,
+                                        jsonp_index=jsonp_index)
+                    else:
+                        r = packets
+                except exceptions.EngineIOError:
+                    if sid in self.sockets:  # pragma: no cover
+                        await self.disconnect(sid)
+                    r = self._bad_request()
+                if sid in self.sockets and self.sockets[sid].closed:
+                    del self.sockets[sid]
+    elif method == 'POST':
+        if sid is None or sid not in self.sockets:
+            self.logger.warning('Invalid session %s', sid)
+            r = self._bad_request()
+        else:
+            socket = self._get_socket(sid)
+            try:
+                await socket.handle_post_request(environ)
+                r = self._ok(jsonp_index=jsonp_index)
+            except exceptions.EngineIOError:
+                if sid in self.sockets:  # pragma: no cover
+                    await self.disconnect(sid)
+                r = self._bad_request()
+            except:  # pragma: no cover
+                # for any other unexpected errors, we log the error
+                # and keep going
+                self.logger.exception('post request handler error')
+                r = self._ok(jsonp_index=jsonp_index)
+    elif method == 'OPTIONS':
+        r = self._ok()
+    else:
+        self.logger.warning('Method %s not supported', method)
+        r = self._method_not_found()
+    if not isinstance(r, dict):
+        return r
+    if self.http_compression and \
+            len(r['response']) >= self.compression_threshold:
+        encodings = [e.split(';')[0].strip() for e in
+                        environ.get('HTTP_ACCEPT_ENCODING', '').split(',')]
+        for encoding in encodings:
+            if encoding in self.compression_methods:
+                r['response'] = \
+                    getattr(self, '_' + encoding)(r['response'])
+                r['headers'] += [('Content-Encoding', encoding)]
+                break
+    cors_headers = self._cors_headers(environ)
+    make_response = self._async['make_response']
+    if asyncio.iscoroutinefunction(make_response):
+        response = await make_response(r['status'],
+                                        r['headers'] + cors_headers,
+                                        r['response'], environ)
+    else:
+        response = make_response(r['status'], r['headers'] + cors_headers,
+                                    r['response'], environ)
+    return response
+
+sio = socketio.AsyncServer(async_mode='asgi')
+ns_terminal = TerminalNamespace('/', sio)
+sio.register_namespace(ns_terminal)
+socket = socketio.ASGIApp(sio)
 sio.eio._handle_connect = types.MethodType(_handle_connect, sio.eio)
+sio.eio.handle_request = types.MethodType(handle_request, sio.eio)
