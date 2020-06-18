@@ -9,7 +9,6 @@ import os
 import sys
 import signal
 import asyncio
-from traceback import print_exc
 from engineio import asyncio_socket, packet, exceptions
 
 # signal.signal(signal.SIGCHLD, lambda signum, bt: os.waitpid(-1, os.WNOHANG))
@@ -20,15 +19,16 @@ class TerminalNamespace(socketio.AsyncNamespace):
         self.sio = sio
         self.ext = {"python3":".py", "clang":".c"}
     
-    
-    async def on_connect(self, sid, environ):
-        await self.sio.emit('test', {'data': 'hi'}, to=sid)
+
+    # async def on_connect(self, sid, environ):
+    #     await self.sio.emit('test', {'data': 'hi'}, to=sid)
 
     
     async def on_disconnect(self, sid):
         print(f"disconnect {sid}")
-        session = await self.sio.get_session(sid)
+        session = await self.get_session(sid)
         if session:
+            session['task'].cancel()
             try:
                 p = subprocess.Popen(["docker", "stop", "--time", "5", sid], stdin=None, stdout=None, stderr=None, close_fds=True)
                 p.communicate(timeout=5)
@@ -42,20 +42,20 @@ class TerminalNamespace(socketio.AsyncNamespace):
     
     async def wait_for_idle(self, session_id, caller, **kargs):
         try:
-            session = await self.sio.get_session(session_id)
+            session = await self.get_session(session_id)
+            if session:
+                while not session['idle']:
+                    print('wait_for_idle', caller.__name__)
+                    session = await self.get_session(session_id)
+                    await asyncio.sleep(0.5)
 
-            while not session['idle']:
-                print('wait_for_idle', caller.__name__)
-                session = await self.sio.get_session(session_id)
-                await asyncio.sleep(0.5)
+                session['idle'] = False
+                await self.sio.save_session(session_id, session)
 
-            session['idle'] = False
-            await self.sio.save_session(session_id, session)
+                await caller(**kargs)
 
-            await caller(**kargs)
-
-            session['idle'] = True
-            await self.sio.save_session(session_id, session)
+                session['idle'] = True
+                await self.sio.save_session(session_id, session)
         except KeyError:
             pass
 
@@ -75,7 +75,7 @@ class TerminalNamespace(socketio.AsyncNamespace):
 
     
     async def compile_code(self, sid, data):
-        session = await self.sio.get_session(sid)
+        session = await self.get_session(sid)
         
         os.write(session['fd'], f"clear\n".encode())
 
@@ -91,7 +91,7 @@ class TerminalNamespace(socketio.AsyncNamespace):
     
     async def on_create_terminal(self, sid, data):
         try:
-            session = await self.sio.get_session(sid)
+            session = await self.get_session(sid)
 
             if session:
                 return
@@ -100,6 +100,7 @@ class TerminalNamespace(socketio.AsyncNamespace):
 
             if child_pid == 0:
                 subprocess.run(["docker", "run", "-it", "--rm", "--name", sid, "-e", f"COLUMNS={data['columns']}", "-e", f"LINES={data['rows']}", "-e", "TERM=screen-256color", "ctmanjak/codedu_base:terminal"])
+                sys.exit(0)
             else:
                 print("opening a new session")
 
@@ -120,7 +121,7 @@ class TerminalNamespace(socketio.AsyncNamespace):
     
     async def on_client_input(self, sid, data):
         try:
-            session = await self.sio.get_session(sid)
+            session = await self.get_session(sid)
             
             if session:
                 file_desc = session["fd"]
@@ -131,13 +132,23 @@ class TerminalNamespace(socketio.AsyncNamespace):
             pass
                         
     
+    async def get_session(self, sid):
+        session = None
+        try:
+            if sid in self.sio.eio.sockets:
+                session = await self.sio.get_session(sid)
+        except KeyError as e:
+            print("get_session", e)
+
+        return session
+
     async def read_output(self, sid):
         max_read_bytes = 1024 * 2
         
         while True:
             try:
-                session = await self.sio.get_session(sid)
-
+                session = await self.get_session(sid)
+                
                 await self.sio.sleep(0.01)
 
                 if session:
@@ -159,11 +170,12 @@ class TerminalNamespace(socketio.AsyncNamespace):
                                     },
                                     sid,
                                 )
-            except KeyError:
-                print_exc()
+                else: break
+            except KeyError as e:
+                print("read_output", e)
                 break
-            except OSError:
-                print_exc()
+            except OSError as e:
+                print("read_output", e)
                 await self.sio.disconnect(sid)
                 break
 
@@ -186,12 +198,14 @@ async def receive(self, pkt):
                             pkt.data if not isinstance(pkt.data, bytes)
                             else '<binary>')
     if pkt.packet_type == packet.PING:
-        self.last_ping = time.time()
-        if not self.on_terminal:
+        if hasattr(self, "first_ping") and not self.on_terminal:
             print("close")
             await self.close()
         else:
+            self.first_ping = None
+            self.last_ping = time.time()
             await self.send(packet.Packet(packet.PONG, pkt.data))
+        # await self.send(packet.Packet(packet.PONG, pkt.data))
     elif pkt.packet_type == packet.MESSAGE:
         await self.server._trigger_event(
             'message', self.sid, pkt.data,
@@ -246,8 +260,8 @@ async def _handle_connect(self, environ, transport, b64=False,
         try:
             return self._ok(await s.poll(), headers=headers, b64=b64,
                             jsonp_index=jsonp_index)
-        except exceptions.QueueEmpty:
-            print_exc()
+        except exceptions.QueueEmpty as e:
+            print("_handle_connect", e)
             return self._bad_request()
 
 async def handle_request(self, *args, **kwargs):
@@ -288,7 +302,6 @@ async def handle_request(self, *args, **kwargs):
 
     method = environ['REQUEST_METHOD']
     query = urllib.parse.parse_qs(environ.get('QUERY_STRING', ''))
-
     sid = query['sid'][0] if 'sid' in query else None
     b64 = False
     jsonp = False
@@ -330,8 +343,8 @@ async def handle_request(self, *args, **kwargs):
                                         jsonp_index=jsonp_index)
                     else:
                         r = packets
-                except exceptions.EngineIOError:
-                    print_exc()
+                except exceptions.EngineIOError as e
+                    print("handle_request", e)
                     if sid in self.sockets:  # pragma: no cover
                         await self.disconnect(sid)
                     r = self._bad_request()
@@ -346,8 +359,8 @@ async def handle_request(self, *args, **kwargs):
             try:
                 await socket.handle_post_request(environ)
                 r = self._ok(jsonp_index=jsonp_index)
-            except exceptions.EngineIOError:
-                print_exc()
+            except exceptions.EngineIOError as e:
+                print("handle_request", e)
                 if sid in self.sockets:  # pragma: no cover
                     await self.disconnect(sid)
                 r = self._bad_request()
