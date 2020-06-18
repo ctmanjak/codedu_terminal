@@ -9,15 +9,17 @@ import os
 import sys
 import signal
 import asyncio
-from engineio import asyncio_socket, packet
+from traceback import print_exc
+from engineio import asyncio_socket, packet, exceptions
 
-signal.signal(signal.SIGCHLD, lambda signum, bt: os.waitpid(-1, os.WNOHANG))
+# signal.signal(signal.SIGCHLD, lambda signum, bt: os.waitpid(-1, os.WNOHANG))
 
 class TerminalNamespace(socketio.AsyncNamespace):
     def __init__(self, namespace, sio):
         super().__init__(namespace)
         self.sio = sio
         self.ext = {"python3":".py", "clang":".c"}
+    
     
     async def on_connect(self, sid, environ):
         await self.sio.emit('test', {'data': 'hi'}, to=sid)
@@ -28,13 +30,14 @@ class TerminalNamespace(socketio.AsyncNamespace):
         session = await self.sio.get_session(sid)
         if session:
             try:
-                p = subprocess.Popen(["docker", "stop", sid], stdin=None, stdout=None, stderr=None, close_fds=True)
+                p = subprocess.Popen(["docker", "stop", "--time", "5", sid], stdin=None, stdout=None, stderr=None, close_fds=True)
                 p.communicate(timeout=5)
                 print(f"stopped container {sid}")
             except subprocess.TimeoutExpired:
                 print("timeout when stop container")
                 p.kill()
                 print("killed stop container process")
+                os.kill(session['child_pid'], signal.SIGKILL)
     
     
     async def wait_for_idle(self, session_id, caller, **kargs):
@@ -86,7 +89,7 @@ class TerminalNamespace(socketio.AsyncNamespace):
         await self.wait_for_idle(sid, self.compile_code, sid=sid, data=data)
 
     
-    async def on_create_terminal(self, sid):
+    async def on_create_terminal(self, sid, data):
         try:
             session = await self.sio.get_session(sid)
 
@@ -96,7 +99,7 @@ class TerminalNamespace(socketio.AsyncNamespace):
             (child_pid, fd) = pty.fork()
 
             if child_pid == 0:
-                subprocess.run(["docker", "run", "-it", "--rm", "--name", sid, "ctmanjak/codedu_base:terminal"])
+                subprocess.run(["docker", "run", "-it", "--rm", "--name", sid, "-e", f"COLUMNS={data['columns']}", "-e", f"LINES={data['rows']}", "-e", "TERM=screen-256color", "ctmanjak/codedu_base:terminal"])
             else:
                 print("opening a new session")
 
@@ -157,8 +160,10 @@ class TerminalNamespace(socketio.AsyncNamespace):
                                     sid,
                                 )
             except KeyError:
+                print_exc()
                 break
             except OSError:
+                print_exc()
                 await self.sio.disconnect(sid)
                 break
 
@@ -183,6 +188,7 @@ async def receive(self, pkt):
     if pkt.packet_type == packet.PING:
         self.last_ping = time.time()
         if not self.on_terminal:
+            print("close")
             await self.close()
         else:
             await self.send(packet.Packet(packet.PONG, pkt.data))
@@ -241,6 +247,7 @@ async def _handle_connect(self, environ, transport, b64=False,
             return self._ok(await s.poll(), headers=headers, b64=b64,
                             jsonp_index=jsonp_index)
         except exceptions.QueueEmpty:
+            print_exc()
             return self._bad_request()
 
 async def handle_request(self, *args, **kwargs):
@@ -324,6 +331,7 @@ async def handle_request(self, *args, **kwargs):
                     else:
                         r = packets
                 except exceptions.EngineIOError:
+                    print_exc()
                     if sid in self.sockets:  # pragma: no cover
                         await self.disconnect(sid)
                     r = self._bad_request()
@@ -339,6 +347,7 @@ async def handle_request(self, *args, **kwargs):
                 await socket.handle_post_request(environ)
                 r = self._ok(jsonp_index=jsonp_index)
             except exceptions.EngineIOError:
+                print_exc()
                 if sid in self.sockets:  # pragma: no cover
                     await self.disconnect(sid)
                 r = self._bad_request()
