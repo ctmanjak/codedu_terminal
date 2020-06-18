@@ -23,21 +23,15 @@ class TerminalNamespace(socketio.AsyncNamespace):
     # async def on_connect(self, sid, environ):
     #     await self.sio.emit('test', {'data': 'hi'}, to=sid)
 
-    
-    async def on_disconnect(self, sid):
-        print(f"disconnect {sid}")
+
+    async def disconnect(self, sid):
         session = await self.get_session(sid)
         if session:
-            session['task'].cancel()
-            try:
-                p = subprocess.Popen(["docker", "stop", "--time", "5", sid], stdin=None, stdout=None, stderr=None, close_fds=True)
-                p.communicate(timeout=5)
-                print(f"stopped container {sid}")
-            except subprocess.TimeoutExpired:
-                print("timeout when stop container")
-                p.kill()
-                print("killed stop container process")
-                os.kill(session['child_pid'], signal.SIGKILL)
+            os.killpg(os.getpgid(session['child_pid']), signal.SIGTERM)
+    
+
+    async def on_disconnect(self, sid):
+        await self.disconnect(sid)
     
     
     async def wait_for_idle(self, session_id, caller, **kargs):
@@ -96,25 +90,30 @@ class TerminalNamespace(socketio.AsyncNamespace):
             if session:
                 return
 
-            (child_pid, fd) = pty.fork()
+            (master, slave) = pty.openpty()
+            
+            p = subprocess.Popen(f"docker run -it --rm --name {sid} -e COLUMNS={data['columns']} -e LINES={data['rows']} -e TERM=screen-256color ctmanjak/codedu_base:terminal",
+                stdin=slave,
+                stdout=slave,
+                shell=True,
+            )
 
-            if child_pid == 0:
-                subprocess.run(["docker", "run", "-it", "--rm", "--name", sid, "-e", f"COLUMNS={data['columns']}", "-e", f"LINES={data['rows']}", "-e", "TERM=screen-256color", "ctmanjak/codedu_base:terminal"])
-                sys.exit(0)
-            else:
-                print("opening a new session")
+            child_pid = p.pid
+            fd = master
+            
+            print("opening a new session")
 
-                print("connect: child pid is", child_pid)
+            print("connect: child pid is", child_pid)
 
-                task = self.sio.start_background_task(
-                    target=self.read_output, sid=sid
-                )
-                
-                await self.sio.save_session(sid, {"idle":None,"fd":fd, "child_pid":child_pid, "task":task})
+            task = self.sio.start_background_task(
+                target=self.read_output, sid=sid
+            )
+            
+            await self.sio.save_session(sid, {"idle":None, "fd":fd, "child_pid":child_pid, "task":task})
 
-                print("connect: task started")
+            print("connect: task started")
 
-                self.sio.eio.sockets[sid].on_terminal = True
+            self.sio.eio.sockets[sid].on_terminal = True
         except KeyError:
             pass
 
@@ -141,6 +140,7 @@ class TerminalNamespace(socketio.AsyncNamespace):
             print("get_session", e)
 
         return session
+
 
     async def read_output(self, sid):
         max_read_bytes = 1024 * 2
