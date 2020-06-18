@@ -27,7 +27,8 @@ class TerminalNamespace(socketio.AsyncNamespace):
     async def disconnect(self, sid):
         session = await self.get_session(sid)
         if session:
-            os.killpg(os.getpgid(session['child_pid']), signal.SIGTERM)
+            print(f"disconnect {sid}")
+            os.kill(session['child_pid'], signal.SIGTERM)
     
 
     async def on_disconnect(self, sid):
