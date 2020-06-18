@@ -343,7 +343,7 @@ async def handle_request(self, *args, **kwargs):
                                         jsonp_index=jsonp_index)
                     else:
                         r = packets
-                except exceptions.EngineIOError as e
+                except exceptions.EngineIOError as e:
                     print("handle_request", e)
                     if sid in self.sockets:  # pragma: no cover
                         await self.disconnect(sid)
