@@ -18,10 +18,6 @@ class TerminalNamespace(socketio.AsyncNamespace):
         super().__init__(namespace)
         self.sio = sio
         self.ext = {"python3":".py", "clang":".c"}
-    
-
-    # async def on_connect(self, sid, environ):
-    #     await self.sio.emit('test', {'data': 'hi'}, to=sid)
 
 
     async def disconnect(self, sid):
@@ -39,7 +35,7 @@ class TerminalNamespace(socketio.AsyncNamespace):
         try:
             session = await self.get_session(session_id)
             if session:
-                while not session['idle']:
+                while session and not session['idle']:
                     print('wait_for_idle', caller.__name__)
                     session = await self.get_session(session_id)
                     await asyncio.sleep(0.5)
@@ -55,29 +51,22 @@ class TerminalNamespace(socketio.AsyncNamespace):
             pass
 
     
-    async def save_code(self, sid, data):
-        tmp_filename = f"{sid}_{data['lang']}"
-        with open(tmp_filename, "w") as f:
-            f.write(data["code"])
-        
-        subprocess.run(["docker", "cp", tmp_filename, f"{sid}:root/main{self.ext[data['lang']]}"])
-
-        os.remove(tmp_filename)
-
-    
-    async def on_save_code(self, sid, data):
-        await self.wait_for_idle(sid, self.save_code, sid=sid, data=data)
-
-    
     async def compile_code(self, sid, data):
         session = await self.get_session(sid)
         
-        os.write(session['fd'], f"clear\n".encode())
+        if session and data and 'path' in data and 'lang' in data:
+            os.write(session['fd'], f"clear\n".encode())
 
-        if data['lang'] == 'python3':
-            os.write(session['fd'], f"python3 ~/main{self.ext[data['lang']]}\n".encode())
-        elif data['lang'] == 'clang':
-            os.write(session['fd'], f"gcc -o main ~/main{self.ext[data['lang']]} && ./main\n".encode())\
+            array_path = data['path'].split("/")
+            path = "/".join(array_path[:-1])
+            filename = array_path[-1]
+
+            full_path = f"/codedu/nfs/{path}"
+
+            if data['lang'] == 'python3':
+                os.write(session['fd'], f"python3 {full_path}/{filename}\n".encode())
+            elif data['lang'] == 'clang':
+                os.write(session['fd'], f"gcc -o {full_path}/main {full_path}/{filename} && {full_path}/main\n".encode())
 
     
     async def on_compile_code(self, sid, data):
