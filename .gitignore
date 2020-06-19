@@ -17,6 +17,7 @@
 # doc/**/*.pdf
 
 .venv/
+codes/
 **/__pycache__
 **/*.bak
 **/ign-*

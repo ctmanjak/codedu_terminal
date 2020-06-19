@@ -22,9 +22,19 @@ class TerminalNamespace(socketio.AsyncNamespace):
 
     async def disconnect(self, sid):
         session = await self.get_session(sid)
+
+        print(f"disconnect {sid}")
         if session:
-            print(f"disconnect {sid}")
+            session['task'].cancel()
             os.kill(session['child_pid'], signal.SIGTERM)
+            try:
+                p = subprocess.Popen(["docker", "stop", "--time", "5", sid], stdin=None, stdout=None, stderr=None, close_fds=True)
+                p.communicate(timeout=5)
+                print(f"stopped container {sid}")
+            except subprocess.TimeoutExpired:
+                print(f"timeout when stop container {sid}")
+                p.kill()
+                print("killed stop container process")
     
 
     async def on_disconnect(self, sid):
@@ -54,19 +64,25 @@ class TerminalNamespace(socketio.AsyncNamespace):
     async def compile_code(self, sid, data):
         session = await self.get_session(sid)
         
-        if session and data and 'path' in data and 'lang' in data:
-            os.write(session['fd'], f"clear\n".encode())
+        if session and data and 'path' in data:
+            try:
+                array_path = data['path'].split("/")
+                path = "/".join(array_path[:-1])
+                filename = array_path[-1]
+                lang = array_path[1]
 
-            array_path = data['path'].split("/")
-            path = "/".join(array_path[:-1])
-            filename = array_path[-1]
+                full_path = f"/codedu/nfs/{path}"
 
-            full_path = f"/codedu/nfs/{path}"
+                subprocess.run(["docker", "cp", f"{full_path}/{filename}", f"{sid}:/root/{filename}"])
 
-            if data['lang'] == 'python3':
-                os.write(session['fd'], f"python3 {full_path}/{filename}\n".encode())
-            elif data['lang'] == 'clang':
-                os.write(session['fd'], f"gcc -o {full_path}/main {full_path}/{filename} && {full_path}/main\n".encode())
+                os.write(session['fd'], f"clear\n".encode())
+                if lang == 'python3':
+                    os.write(session['fd'], f"python3 ~/{filename}\n".encode())
+                elif lang == 'clang':
+                    os.write(session['fd'], f"gcc -o ~/main ~/{filename} && ~/main\n".encode())
+            except:
+                print(f"failed compile sid: {sid}")
+                print(f"received data: {data}")
 
     
     async def on_compile_code(self, sid, data):
