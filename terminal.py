@@ -9,9 +9,13 @@ import os
 import sys
 import signal
 import asyncio
+from hashlib import sha256
 from engineio import asyncio_socket, packet, exceptions
 
 # signal.signal(signal.SIGCHLD, lambda signum, bt: os.waitpid(-1, os.WNOHANG))
+
+if not os.path.isdir("/codedu/nfs/codes"): os.mkdir("/codedu/nfs/codes")
+if not os.path.isdir("/codedu/nfs/codes/tmp"): os.mkdir("/codedu/nfs/codes/tmp")
 
 class TerminalNamespace(socketio.AsyncNamespace):
     def __init__(self, namespace, sio):
@@ -60,7 +64,40 @@ class TerminalNamespace(socketio.AsyncNamespace):
         except KeyError:
             pass
 
+
+    async def run_code(self, sid, data):
+        session = await self.get_session(sid)
+
+        if session and data and 'code' in data and 'lang' in data:
+            tmp_path = "/codedu/nfs/codes/tmp"
+            i = 0
+            while True:
+                tmp_filename = f"tmp_{sha256(('tmp_code'+str(i)).encode()).hexdigest()}"
+                i+=1
+                if not os.path.isfile(f"{tmp_path}/{tmp_filename}"): break
+
+            with open(f"{tmp_path}/{tmp_filename}", "w") as f:
+                f.write(data['code'])
+
+            full_path = f"{tmp_path}/{tmp_filename}"
+            
+            filename = f"main{self.ext[data['lang']]}"
+
+            subprocess.run(["docker", "cp", full_path, f"{sid}:/root/{filename}"])
+
+            os.write(session['fd'], f"clear\n".encode())
+            try:
+                if data['lang'] == 'python3':
+                    os.write(session['fd'], f"python3 ~/{filename}\n".encode())
+                elif data['lang'] == 'clang':
+                    os.write(session['fd'], f"gcc -o ~/main ~/{filename} && ~/main\n".encode())
+            except:
+                print(f"failed run sid: {sid}")
+                print(f"received data: {data}")
     
+    async def on_run_code(self, sid, data):
+        await self.wait_for_idle(sid, self.run_code, sid=sid, data=data)
+
     async def compile_code(self, sid, data):
         session = await self.get_session(sid)
         

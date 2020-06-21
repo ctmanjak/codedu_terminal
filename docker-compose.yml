@@ -6,6 +6,7 @@ services:
       context: .
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./codes:/codedu/nfs/codes
     environment:
       LC_ALL: C.UTF-8
       LANG: C.UTF-8
