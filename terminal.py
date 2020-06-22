@@ -1,3 +1,4 @@
+import re
 import urllib
 import subprocess
 import types
@@ -9,6 +10,7 @@ import os
 import sys
 import signal
 import asyncio
+from traceback import print_exc
 from hashlib import sha256
 from engineio import asyncio_socket, packet, exceptions
 
@@ -21,8 +23,21 @@ class TerminalNamespace(socketio.AsyncNamespace):
     def __init__(self, namespace, sio):
         super().__init__(namespace)
         self.sio = sio
-        self.ext = {"python3":".py", "clang":".c"}
+        self.ext = {"python3":".py", "clang":".c", "cpp":".cpp", "java":".java", "kotlin":".kt"}
 
+    async def run_code_(self, fd, lang, filename):
+        os.write(fd, f"clear\n".encode())
+
+        if lang == 'python3':
+            os.write(fd, f"python3 ~/{filename}\n".encode())
+        elif lang == 'clang':
+            os.write(fd, f"gcc -o ~/main ~/{filename} && ~/main\n".encode())
+        elif lang == 'cpp':
+            os.write(fd, f"g++ -o ~/main ~/{filename} && ~/main\n".encode())
+        elif lang == 'java':
+            os.write(fd, f"javac ~/{filename} && java -classpath ~ {'.'.join(filename.split('.')[:-1])}\n".encode())
+        elif lang == 'kotlin':
+            os.write(fd, f"kotlinc ~/{filename} -include-runtime -d ~/main.jar && java -jar ~/main.jar\n".encode())
 
     async def disconnect(self, sid):
         session = await self.get_session(sid)
@@ -69,30 +84,29 @@ class TerminalNamespace(socketio.AsyncNamespace):
         session = await self.get_session(sid)
 
         if session and data and 'code' in data and 'lang' in data:
-            tmp_path = "/codedu/nfs/codes/tmp"
-            i = 0
-            while True:
-                tmp_filename = f"tmp_{sha256(('tmp_code'+str(i)).encode()).hexdigest()}"
-                i+=1
-                if not os.path.isfile(f"{tmp_path}/{tmp_filename}"): break
-
-            with open(f"{tmp_path}/{tmp_filename}", "w") as f:
-                f.write(data['code'])
-
-            full_path = f"{tmp_path}/{tmp_filename}"
-            
-            filename = f"main{self.ext[data['lang']]}"
-
-            subprocess.run(["docker", "cp", full_path, f"{sid}:/root/{filename}"])
-
-            os.write(session['fd'], f"clear\n".encode())
             try:
-                if data['lang'] == 'python3':
-                    os.write(session['fd'], f"python3 ~/{filename}\n".encode())
-                elif data['lang'] == 'clang':
-                    os.write(session['fd'], f"gcc -o ~/main ~/{filename} && ~/main\n".encode())
+                tmp_path = "/codedu/nfs/codes/tmp"
+                i = 0
+                while True:
+                    tmp_filename = f"tmp_{sha256(('tmp_code'+str(i)).encode()).hexdigest()}"
+                    i+=1
+                    if not os.path.isfile(f"{tmp_path}/{tmp_filename}"): break
+
+                with open(f"{tmp_path}/{tmp_filename}", "w") as f:
+                    f.write(data['code'])
+
+                full_path = f"{tmp_path}/{tmp_filename}"
+                javaname = None
+                if data['lang'] == "java":
+                    javaname = re.search(r"(^|\n)[ \t]*public class ([^ ]*)[^{]*{", data['code'])[2]
+                filename = f"{javaname if javaname else 'main'}{self.ext[data['lang']]}"
+                print(filename)
+                subprocess.run(["docker", "cp", full_path, f"{sid}:/root/{filename}"])
+
+                await self.run_code_(session['fd'], data['lang'], filename)
             except:
-                print(f"failed run sid: {sid}")
+                print_exc()
+                print(f"failed compile sid: {sid}")
                 print(f"received data: {data}")
     
     async def on_run_code(self, sid, data):
@@ -111,12 +125,8 @@ class TerminalNamespace(socketio.AsyncNamespace):
                 full_path = f"/codedu/nfs/{path}"
 
                 subprocess.run(["docker", "cp", f"{full_path}/{filename}", f"{sid}:/root/{filename}"])
-
-                os.write(session['fd'], f"clear\n".encode())
-                if lang == 'python3':
-                    os.write(session['fd'], f"python3 ~/{filename}\n".encode())
-                elif lang == 'clang':
-                    os.write(session['fd'], f"gcc -o ~/main ~/{filename} && ~/main\n".encode())
+                
+                await self.run_code_(session['fd'], data['lang'], filename)
             except:
                 print(f"failed compile sid: {sid}")
                 print(f"received data: {data}")
